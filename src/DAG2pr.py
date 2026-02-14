@@ -10,6 +10,26 @@ from google.genai import types
 from openai import OpenAI
 
 
+def _get_openai_client(
+    config: Optional[dict],
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    **kwargs,
+) -> OpenAI:
+    api_keys = (config or {}).get("api_keys", {}) or {}
+    key = api_key or api_keys.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
+    endpoint = (
+        base_url
+        or api_keys.get("openai_api_base")
+        or api_keys.get("openai_base_url")
+        or os.getenv("OPENAI_BASE_URL")
+    )
+    init_kwargs = {"api_key": key, "timeout": 120, "max_retries": 2, **kwargs}
+    if endpoint:
+        init_kwargs["base_url"] = endpoint
+    return OpenAI(**init_kwargs)
+
+
 # ========== Extract basic information for PR Generation ==========
 def extract_basic_information(
     dag_path: str,
@@ -90,8 +110,8 @@ def extract_basic_information(
     else:
         # === OpenAI Client Setup ===
         api_key = api_keys_config.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
-        
-        client = OpenAI(api_key=api_key)
+        base_url = base_url or api_keys_config.get("openai_api_base") or api_keys_config.get("openai_base_url") or os.getenv("OPENAI_BASE_URL")
+        client = _get_openai_client(config=config, api_key=api_key, base_url=base_url)
 
         # OpenAI Call
         resp = client.chat.completions.create(
@@ -256,10 +276,13 @@ def generate_pr_from_dag(
         if not api_key:
             raise RuntimeError("API Key not found for OpenAI.")
 
-        client = OpenAI(
+        base_url = api_keys_conf.get("openai_api_base") or api_keys_conf.get("openai_base_url") or os.getenv("OPENAI_BASE_URL")
+        client = _get_openai_client(
+            config=config,
             api_key=api_key,
+            base_url=base_url,
             timeout=timeout,
-            max_retries=0 # We handle retries manually below
+            max_retries=0, # We handle retries manually below
         )
 
     log(f"[INFO] Using provider = {'Gemini' if is_gemini else 'OpenAI'}")
@@ -723,7 +746,8 @@ def add_title_and_hashtag(pr_path: str, add_title_and_hashtag_prompt: str, model
         except ImportError as e:
             raise ImportError("openai package is required. Install with: pip install openai") from e
 
-        client = OpenAI(api_key=api_key)
+        base_url = api_keys.get("openai_api_base") or api_keys.get("openai_base_url") or os.getenv("OPENAI_BASE_URL")
+        client = _get_openai_client(config=config, api_key=api_key, base_url=base_url)
 
         try:
             resp = client.chat.completions.create(

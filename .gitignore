@@ -1,0 +1,8 @@
+.venv
+.DS_Store
+.idea
+.vscode
+__pycache__
+*.pyc
+mineru_outputs/
+papers/*.pdf

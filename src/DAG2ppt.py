@@ -1,10 +1,23 @@
 import json
 import os
 import re
-from typing import Optional
 from openai import OpenAI
 from google import genai
 from typing import Any, Dict, List, Optional, Union
+
+
+def _get_openai_client(config: Optional[dict], api_key: Optional[str] = None) -> OpenAI:
+    api_keys = (config or {}).get("api_keys", {}) or {}
+    key = api_key or api_keys.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
+    base_url = (
+        api_keys.get("openai_api_base")
+        or api_keys.get("openai_base_url")
+        or os.getenv("OPENAI_BASE_URL")
+    )
+    kwargs = {"api_key": key, "timeout": 120, "max_retries": 2}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return OpenAI(**kwargs)
 
 
 # ==========  生成selected_nodes.json ==========
@@ -201,7 +214,7 @@ def outline_initialize(dag_json_path, outline_initialize_prompt, model, config):
         # --- OpenAI Call ---
         api_key = config['api_keys'].get('openai_api_key')
 
-        client = OpenAI(api_key=api_key)
+        client = _get_openai_client(config, api_key=api_key)
 
         try:
             response = client.chat.completions.create(
@@ -315,7 +328,7 @@ def generate_complete_outline(
         client = genai.Client(api_key=api_key)
     else:
         api_key = config['api_keys'].get('openai_api_key')
-        client = OpenAI(api_key=api_key)
+        client = _get_openai_client(config, api_key=api_key)
 
     # --- iterate selected nodes ---
     for idx, node in enumerate(selected_nodes):
@@ -431,7 +444,7 @@ def arrange_template(
     else:
         api_key = config['api_keys'].get('openai_api_key')
 
-        client = OpenAI(api_key=api_key)
+        client = _get_openai_client(config, api_key=api_key)
 
     # 读取 outline.json
     with open(outline_path, "r", encoding="utf-8") as f:
@@ -652,7 +665,7 @@ def generate_ppt(
     else:
         api_key = config['api_keys'].get('openai_api_key')
         
-        client = OpenAI(api_key=api_key)
+        client = _get_openai_client(config, api_key=api_key)
 
     outline_path = os.path.abspath(outline_path)
     ppt_template_path = os.path.abspath(ppt_template_path)

@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import base64
 from PIL import Image
 from typing import Optional
 from openai import OpenAI
@@ -9,17 +8,83 @@ from google import genai
 from google.genai import types
 
 
-# ==========  调用 Gemini 删除无用段落 ==========
+def _is_gemini_model(model: str) -> bool:
+    return "gemini" in (model or "").lower()
+
+
+def _get_api_keys_config(config: Optional[dict]) -> dict:
+    return (config or {}).get("api_keys", {}) or {}
+
+
+def _get_openai_client(config: Optional[dict]) -> OpenAI:
+    api_keys = _get_api_keys_config(config)
+    api_key = api_keys.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
+    base_url = (
+        api_keys.get("openai_api_base")
+        or api_keys.get("openai_base_url")
+        or os.getenv("OPENAI_BASE_URL")
+    )
+    kwargs = {"api_key": api_key, "timeout": 120, "max_retries": 2}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return OpenAI(**kwargs)
+
+
+def _get_llm_client(model: str, config: Optional[dict]):
+    if _is_gemini_model(model):
+        api_keys = _get_api_keys_config(config)
+        api_key = (
+            api_keys.get("gemini_api_key")
+            or os.getenv("GOOGLE_API_KEY")
+            or os.getenv("GEMINI_API_KEY")
+        )
+        return True, genai.Client(api_key=api_key)
+    return False, _get_openai_client(config)
+
+
+def _generate_text(
+    client,
+    is_gemini: bool,
+    model: str,
+    user_content: str,
+    system_instruction: Optional[str] = None,
+    temperature: float = 0.0,
+    json_output: bool = False,
+) -> str:
+    if is_gemini:
+        gen_cfg = {"temperature": temperature}
+        if system_instruction:
+            gen_cfg["system_instruction"] = system_instruction
+        if json_output:
+            gen_cfg["response_mime_type"] = "application/json"
+        resp = client.models.generate_content(
+            model=model,
+            contents=user_content,
+            config=types.GenerateContentConfig(**gen_cfg),
+        )
+        return (resp.text or "").strip()
+
+    messages = []
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+    messages.append({"role": "user", "content": user_content})
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
+# ==========  调用大模型删除无用段落 ==========
 def clean_paper(markdown_path, clean_prompt, model, config):
     """
-    使用 Google Gemini 清理论文 Markdown 文件：
+    使用大模型清理论文 Markdown 文件：
     删除 Abstract / Related Work / Appendix / References 等部分，
     保留标题、作者、Introduction、Methods、Experiments、Conclusion。
     """
     # === 初始化 Client  ===
-    client = genai.Client(
-        api_key=config['api_keys']['gemini_api_key']
-    )
+    is_gemini, client = _get_llm_client(model, config)
 
     # === 读取 markdown 文件 ===
     with open(markdown_path, "r", encoding="utf-8") as f:
@@ -32,21 +97,20 @@ def clean_paper(markdown_path, clean_prompt, model, config):
         "Return only the cleaned markdown, keeping all formatting identical to the original."
     )
 
-    print("🧹 Sending markdown to Gemini for cleaning...")
+    provider = "Gemini" if is_gemini else "OpenAI-Compatible"
+    print(f"🧹 Sending markdown to {provider} model for cleaning...")
 
     try:
-        # === 调用 Gemini API (Client 模式) ===
-        resp = client.models.generate_content(
+        cleaned_text = _generate_text(
+            client=client,
+            is_gemini=is_gemini,
             model=model,
-            contents=full_prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.0
-            )
+            user_content=full_prompt,
+            temperature=0.0,
         )
-        cleaned_text = resp.text.strip()
         
     except Exception as e:
-        print(f"❌ Gemini API Error: {e}")
+        print(f"❌ LLM API Error: {e}")
         return None
 
     # === 提取纯 markdown（防止模型返回 ```markdown ``` 块） ===
@@ -69,7 +133,7 @@ def clean_paper(markdown_path, clean_prompt, model, config):
     return output_path
 
 
-# ==========  调用 Gemini 划分段落 ==========
+# ==========  调用大模型划分段落 ==========
 SECTION_RE = re.compile(r'^#\s+\d+(\s|$)', re.MULTILINE)
 
 
@@ -87,7 +151,7 @@ def split_paper(
     config: dict = None
 ):
     """
-    使用 Gemini 拆分论文，并将所有拆分后的 markdown 保存在：
+    使用大模型拆分论文，并将所有拆分后的 markdown 保存在：
         <parent_of_auto>/section_split_output/
     """
     # 1️⃣ 输入文件所在的 auto 文件夹
@@ -104,10 +168,8 @@ def split_paper(
     with open(cleaned_md_path, "r", encoding="utf-8") as f:
         markdown_text = f.read()
 
-    # === 2. 初始化 Gemini Client ===
-    client = genai.Client(
-        api_key=config['api_keys']['gemini_api_key']
-    )
+    # === 2. 初始化 LLM Client ===
+    is_gemini, client = _get_llm_client(model, config)
 
     # === 提取一级 section 信息供参考 (假设 SECTION_RE 已在外部定义) ===
     # 注意：确保 SECTION_RE 在此函数作用域内可用
@@ -127,24 +189,23 @@ def split_paper(
         + markdown_text
     )
 
-    # === 3. Gemini 调用 ===
+    # === 3. LLM 调用 ===
     try:
-        response = client.models.generate_content(
+        output_text = _generate_text(
+            client=client,
+            is_gemini=is_gemini,
             model=model,
-            contents=final_prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.0
-            )
+            user_content=final_prompt,
+            temperature=0.0,
         )
-        output_text = response.text
     except Exception as e:
-        print(f"❌ Gemini Split Error: {e}")
+        print(f"❌ LLM Split Error: {e}")
         return []
 
     # === 按分隔符拆分 ===
     # 简单的容错处理，防止模型没有完全按格式输出
     if not output_text:
-        print("❌ Empty response from Gemini")
+        print("❌ Empty response from LLM")
         return []
 
     chunks = [c.strip() for c in output_text.split(separator) if c.strip()]
@@ -177,10 +238,10 @@ def split_paper(
     return saved_paths
 
 
-# ==========  调用 Gemini 初始化dag.json ==========
+# ==========  调用大模型初始化dag.json ==========
 def initialize_dag(markdown_path, initialize_dag_prompt, model, config=None):
     """
-    使用 Gemini 初始化论文 DAG。
+    使用大模型初始化论文 DAG。
     
     输入:
         markdown_path: markdown 文件路径
@@ -199,32 +260,28 @@ def initialize_dag(markdown_path, initialize_dag_prompt, model, config=None):
     with open(markdown_path, "r", encoding="utf-8") as f:
         md_text = f.read()
 
-    # --- Gemini Client Init ---
-    client = genai.Client(
-        api_key=config['api_keys']['gemini_api_key']
-    )
+    # --- LLM Client Init ---
+    is_gemini, client = _get_llm_client(model, config)
 
-    # --- Gemini Call ---
+    # --- LLM Call ---
     # 将 Prompt 和 文本合并作为用户输入，System Prompt 放入 config
     full_content = f"{initialize_dag_prompt}\n\n{md_text}"
 
     try:
-        response = client.models.generate_content(
+        raw_output = _generate_text(
+            client=client,
+            is_gemini=is_gemini,
             model=model,
-            contents=full_content,
-            config=types.GenerateContentConfig(
-                system_instruction="You are an expert academic document parser and structural analyzer.",
-                temperature=0.0,
-                response_mime_type="application/json" # <--- 强制输出 JSON 模式
-            )
+            user_content=full_content,
+            system_instruction="You are an expert academic document parser and structural analyzer.",
+            temperature=0.0,
+            json_output=True,
         )
-        raw_output = response.text.strip()
     except Exception as e:
-        print(f"❌ Gemini API Error: {e}")
+        print(f"❌ LLM API Error: {e}")
         raise e
 
     # --- Extract JSON (remove possible markdown fences) ---
-    # Gemini 在 JSON 模式下通常只返回纯 JSON，但保留此逻辑以防万一
     cleaned = raw_output
 
     # Remove ```json ... ```
@@ -249,7 +306,7 @@ def initialize_dag(markdown_path, initialize_dag_prompt, model, config=None):
             # 这里保留原有的重试逻辑 (通常是为了处理转义字符)
             dag_data = json.loads(cleaned)
         except json.JSONDecodeError as e:
-            raise ValueError(f"Gemini output is not valid JSON:\n{raw_output}")
+            raise ValueError(f"Model output is not valid JSON:\n{raw_output}")
 
     # --- Save dag.json ---
     out_dir = os.path.dirname(markdown_path)
@@ -268,7 +325,7 @@ def extract_and_generate_visual_dag(
     markdown_path: str,
     prompt_for_gpt: str,
     output_json_path: str,
-    model="gemini-3.0-pro-preview",
+    model="gpt-4o",
     config=None
 ):
     """
@@ -276,7 +333,7 @@ def extract_and_generate_visual_dag(
         markdown_path: 原论文 markdown 文件路径
         prompt_for_gpt: 给 GPT 使用的 prompt
         output_json_path: 生成的 visual_dag.json 存放路径
-        model: 默认 gemini-3.0-pro-preview
+        model: 模型名称
 
     输出:
         生成 visual_dag.json
@@ -299,11 +356,8 @@ def extract_and_generate_visual_dag(
     # 生成标准格式 name 字段使用的写法 "![](xxx)"
     normalized_refs = [f"![]({m})" for m in relative_imgs]
 
-    # === 3. 发送给 Gemini ===
-    # 初始化 Client
-    client = genai.Client(
-        api_key=config['api_keys']['gemini_api_key']
-    )
+    # === 3. 发送给大模型 ===
+    is_gemini, client = _get_llm_client(model, config)
 
     gpt_input = prompt_for_gpt + "\n\n" + \
         "### Extracted Image References:\n" + \
@@ -311,17 +365,16 @@ def extract_and_generate_visual_dag(
         "### Full Markdown:\n" + md_text
 
     try:
-        response = client.models.generate_content(
+        visual_dag_str = _generate_text(
+            client=client,
+            is_gemini=is_gemini,
             model=model,
-            contents=gpt_input,
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                response_mime_type="application/json"  # 强制 JSON 输出
-            )
+            user_content=gpt_input,
+            temperature=0.0,
+            json_output=True,
         )
-        visual_dag_str = response.text.strip()
     except Exception as e:
-        print(f"❌ Gemini API Error: {e}")
+        print(f"❌ LLM API Error: {e}")
         raise e
 
     # === JSON 解析兜底修复逻辑（不做任何语义改写） ===
@@ -506,15 +559,15 @@ def add_resolution_to_visual_dag(auto_path, visual_dag_path):
     return nodes
 
 
-# ==========  调用 gemini-3-pro-preview 生成每一个section_dag ==========
+# ==========  调用大模型生成每一个section_dag ==========
 def build_section_dags(
     folder_path: str,
     base_prompt: str,
-    model: str = "gemini-3.0-pro-preview", # 建议使用 flash 或 pro
+    model: str = "gpt-4o",
     config: dict = None
 ):
     """
-    Traverse all markdown files in a folder, send each section to Gemini,
+    Traverse all markdown files in a folder, send each section to LLM,
     and save <SectionName>_dag.json.
     Includes robust JSON repair and retry logic.
     """
@@ -524,12 +577,11 @@ def build_section_dags(
     ENABLE_FALLBACK_CONTENT_BACKSLASH_STRIP = True
     FALLBACK_STRIP_BACKSLASH_ONLY_IN_CONTENT = True
     MAX_RETRIES_ON_FAIL = 2
+    MAX_SECTION_MARKDOWN_CHARS = 12000
 
-    # === Init Client (Gemini) ===
-    # 使用 config 中的 key 
-    client = genai.Client(
-        api_key=config['api_keys']['gemini_api_key']
-    )
+    # === Init Client ===
+    is_gemini, client = _get_llm_client(model, config)
+    provider = "Gemini" if is_gemini else "OpenAI-Compatible"
 
     def build_full_prompt(base_prompt: str, section_name: str, md_text: str) -> str:
         return (
@@ -649,20 +701,64 @@ def build_section_dags(
             
         return None, raw0, "FAIL"
 
-    # === Modified: Call Gemini ===
+    def repair_json_with_llm(raw_content: str, section_name: str) -> str:
+        repair_prompt = (
+            "You are a strict JSON repair engine.\n"
+            "Convert the input into ONE valid JSON object only.\n"
+            "Target schema:\n"
+            "{\"nodes\": [{\"name\": string, \"content\": string, \"edge\": array, \"level\": number, \"visual_node\": array}]}\n"
+            "Rules:\n"
+            "1) Return ONLY JSON.\n"
+            "2) Do not add markdown fences.\n"
+            "3) If some fields are missing, fill with safe defaults.\n\n"
+            f"SECTION_NAME: {section_name}\n"
+            "RAW_INPUT:\n"
+            f"{raw_content[:20000]}"
+        )
+        return call_llm(repair_prompt)
+
+    def normalize_section_dag(dag_candidate, section_name: str):
+        if isinstance(dag_candidate, dict):
+            nodes = dag_candidate.get("nodes")
+            if isinstance(nodes, list) and len(nodes) > 0 and all(isinstance(n, dict) for n in nodes):
+                return dag_candidate
+            has_name = isinstance(dag_candidate.get("name"), str) and dag_candidate.get("name").strip()
+            has_content = isinstance(dag_candidate.get("content"), str)
+            if has_name and has_content:
+                return {"nodes": [dag_candidate]}
+
+        if isinstance(dag_candidate, list) and len(dag_candidate) > 0 and all(isinstance(n, dict) for n in dag_candidate):
+            return {"nodes": dag_candidate}
+
+        return None
+
+    def build_fallback_dag(section_name: str, md_text: str):
+        fallback_name = os.path.splitext(section_name)[0].strip() or "section_fallback"
+        fallback_content = re.sub(r"\s+", " ", md_text).strip()[:1200]
+        return {
+            "nodes": [
+                {
+                    "name": fallback_name,
+                    "content": fallback_content,
+                    "edge": [],
+                    "level": 1,
+                    "visual_node": [],
+                }
+            ]
+        }
+
+    # === Call LLM ===
     def call_llm(full_prompt: str) -> str:
         try:
-            resp = client.models.generate_content(
+            return _generate_text(
+                client=client,
+                is_gemini=is_gemini,
                 model=model,
-                contents=full_prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.2,
-                    # 可以在这里加 response_mime_type="application/json" 进一步增强稳定性
-                )
+                user_content=full_prompt,
+                temperature=0.2,
             )
-            return resp.text.strip()
         except Exception as e:
-            print(f"❌ Gemini API Error: {e}")
+            print(f"❌ LLM API Error: {e}")
             return ""
 
     def preprocess_llm_output(raw_content: str) -> str:
@@ -690,10 +786,33 @@ def build_section_dags(
 
         section_name = filename
         with open(markdown_path, "r", encoding="utf-8") as f:
-            md_text = f.read().strip()
+            md_full = f.read().strip()
+
+        md_text = md_full
+        if len(md_full) > MAX_SECTION_MARKDOWN_CHARS:
+            md_text = md_full[:MAX_SECTION_MARKDOWN_CHARS]
+            print(
+                f"✂️ Truncated section '{section_name}' markdown from "
+                f"{len(md_full)} to {len(md_text)} chars for stable JSON generation."
+            )
+
+        if "introduction" in section_name.lower():
+            print(f"⚡ Using fallback DAG for slow section: {section_name}")
+            dag_obj = build_fallback_dag(section_name, md_full)
+            safe_section_name = re.sub(r"[\\/:*?\"<>|]", "_", section_name)
+            output_filename = f"{safe_section_name}_dag.json"
+            subdir_path = os.path.dirname(folder_path)
+            section_dag_path = os.path.join(subdir_path, "section_dag")
+            os.makedirs(section_dag_path, exist_ok=True)
+            output_path = os.path.join(section_dag_path, output_filename)
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(dag_obj, f, ensure_ascii=False, indent=4)
+            print(f"✅ DAG for section '{section_name}' saved to: {output_path} (parse_stage=FALLBACK_FAST)")
+            outputs[section_name] = output_path
+            continue
 
         full_prompt = build_full_prompt(base_prompt, section_name, md_text)
-        print(f"📐 Sending section '{section_name}' to Gemini for DAG generation...")
+        print(f"📐 Sending section '{section_name}' to {provider} for DAG generation...")
 
         dag_obj = None
         used_text = ""
@@ -708,8 +827,17 @@ def build_section_dags(
             if not raw_content: continue # 如果 API 调用报错返回空，直接重试
 
             raw_content = preprocess_llm_output(raw_content)
-            dag_obj, used_text, stage = robust_load_json(raw_content)
+            dag_candidate, used_text, stage = robust_load_json(raw_content)
 
+            if dag_candidate is None:
+                repaired = repair_json_with_llm(raw_content, section_name)
+                if repaired:
+                    repaired = preprocess_llm_output(repaired)
+                    dag_candidate, used_text, repair_stage = robust_load_json(repaired)
+                    if dag_candidate is not None:
+                        stage = f"REPAIRED_{repair_stage}"
+
+            dag_obj = normalize_section_dag(dag_candidate, section_name)
             if dag_obj is not None:
                 break
             
@@ -717,11 +845,11 @@ def build_section_dags(
 
         if dag_obj is None:
             print(f"{section_name} 处理失败超过两次，已清除")
-            dag_obj = {}
+            dag_obj = build_fallback_dag(section_name, md_full)
         else:
             dag_obj = force_content_single_line(dag_obj)
             if ENABLE_FALLBACK_CONTENT_BACKSLASH_STRIP and FALLBACK_STRIP_BACKSLASH_ONLY_IN_CONTENT:
-                if stage in ("D_extracted_object_repaired",):
+                if stage == "D_extracted_object_repaired" or stage.endswith("D_extracted_object_repaired"):
                     dag_obj = fallback_strip_backslashes_in_content(dag_obj)
 
         # Output
@@ -850,11 +978,16 @@ def add_section_dag(
                 raise ValueError(f"Section DAG JSON invalid at '{section_path}': {e}")
 
         # NEW: coerce into {"nodes":[...]} if missing wrapper
-        section_dag = _coerce_section_dag_to_nodes_wrapper(section_raw, section_path)
+        try:
+            section_dag = _coerce_section_dag_to_nodes_wrapper(section_raw, section_path)
+        except ValueError as e:
+            print(f"⚠️ Skipping invalid section DAG '{section_path}': {e}")
+            continue
 
         # Validate nodes array
         if "nodes" not in section_dag or not isinstance(section_dag["nodes"], list) or len(section_dag["nodes"]) == 0:
-            raise ValueError(f"Section DAG JSON at '{section_path}' has no valid 'nodes' array.")
+            print(f"⚠️ Skipping empty section DAG: {section_path}")
+            continue
 
         section_nodes = section_dag["nodes"]
         section_root = section_nodes[0]
@@ -862,7 +995,8 @@ def add_section_dag(
         # Get section root name
         section_root_name = section_root.get("name")
         if not isinstance(section_root_name, str) or not section_root_name.strip():
-            raise ValueError(f"Section DAG root node at '{section_path}' has invalid or empty 'name'.")
+            print(f"⚠️ Skipping section DAG with invalid root name: {section_path}")
+            continue
 
         # Append section root name into main root's edge
         # (avoid duplicates, in case of reruns)

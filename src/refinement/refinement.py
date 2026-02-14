@@ -14,8 +14,23 @@ from .html_revise import HTMLMapper, apply_html_modifications, HTMLModificationE
 from playwright.sync_api import sync_playwright
 
 
+def _get_openai_client(config: dict = None, api_key: str = None, base_url: str = None, **kwargs):
+    api_keys = (config or {}).get("api_keys", {}) or {}
+    key = api_key or api_keys.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
+    endpoint = (
+        base_url
+        or api_keys.get("openai_api_base")
+        or api_keys.get("openai_base_url")
+        or os.getenv("OPENAI_BASE_URL")
+    )
+    init_kwargs = {"api_key": key, "timeout": 120, "max_retries": 2, **kwargs}
+    if endpoint:
+        init_kwargs["base_url"] = endpoint
+    return OpenAI(**init_kwargs)
+
+
 class VLMCommenter:
-    def __init__(self, api_key, prompt, provider="openai", model_name=None):
+    def __init__(self, api_key, prompt, provider="openai", model_name=None, base_url=None):
         """
         :param api_key: API Key
         :param prompt: 提示词文本
@@ -26,9 +41,10 @@ class VLMCommenter:
         self.api_key = api_key
         self.model_name = model_name
         self.prompt_text = prompt
+        self.base_url = base_url
 
         if self.provider == "openai":
-            self.client = OpenAI(api_key=api_key)
+            self.client = _get_openai_client(api_key=api_key, base_url=base_url)
             self.model = model_name if model_name else "gpt-4o"
         elif self.provider == "gemini":
             self.client = genai.Client(api_key=api_key)
@@ -89,7 +105,7 @@ class VLMCommenter:
 
 
 class LLMReviser:
-    def __init__(self, api_key, prompt, provider="openai", model_name=None):
+    def __init__(self, api_key, prompt, provider="openai", model_name=None, base_url=None):
         """
         :param api_key: API Key
         :param prompt: 提示词文本
@@ -100,9 +116,10 @@ class LLMReviser:
         self.api_key = api_key
         self.model_name = model_name
         self.system_prompt = prompt
+        self.base_url = base_url
 
         if self.provider == "openai":
-            self.client = OpenAI(api_key=api_key)
+            self.client = _get_openai_client(api_key=api_key, base_url=base_url)
             self.model = model_name if model_name else "gpt-4"
         elif self.provider == "gemini":
             self.client = genai.Client(api_key=api_key)
@@ -135,6 +152,31 @@ class LLMReviser:
         Generate the modification JSON based on the system instructions.
         """
 
+        def _extract_json_obj(text: str):
+            if not text:
+                return None
+            candidate = text.strip()
+            if candidate.startswith("```"):
+                candidate = candidate.replace("```json", "").replace("```", "").strip()
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+
+            start = candidate.find("{")
+            end = candidate.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                snippet = candidate[start : end + 1]
+                try:
+                    parsed = json.loads(snippet)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    return None
+            return None
+
         if self.provider == "openai":
             try:
                 response = self.client.chat.completions.create(
@@ -145,8 +187,22 @@ class LLMReviser:
                     ],
                     response_format={"type": "json_object"}
                 )
-                return json.loads(response.choices[0].message.content)
+                return _extract_json_obj(response.choices[0].message.content)
             except Exception as e:
+                err = str(e)
+                if "response_format.type" in err and "not supported" in err:
+                    try:
+                        response = self.client.chat.completions.create(
+                            model=self.model,
+                            messages=[
+                                {"role": "system", "content": prompt_system},
+                                {"role": "user", "content": user_content}
+                            ],
+                        )
+                        return _extract_json_obj(response.choices[0].message.content)
+                    except Exception as e2:
+                        print(f"OpenAI Fallback Error: {e2}")
+                        return None
                 print(f"OpenAI Error: {e}")
                 return None
 
@@ -296,16 +352,22 @@ def refine_one_slide(input_path, output_path, prompts, outline, max_iterations, 
 
     if is_gemini:
         api_key = config['api_keys'].get('gemini_api_key')
+        base_url = None
     else:
         api_key = config['api_keys'].get('openai_api_key')
+        base_url = (
+            config['api_keys'].get('openai_api_base')
+            or config['api_keys'].get('openai_base_url')
+            or os.getenv("OPENAI_BASE_URL")
+        )
 
     commenter_prompt = prompts[0]
     reviser_prompt = prompts[1]
 
     platform = "gemini" if "gemini" in model.lower() else "openai"
 
-    vlm = VLMCommenter(api_key, commenter_prompt, provider=platform, model_name=model)
-    reviser = LLMReviser(api_key, reviser_prompt, provider=platform, model_name=model)
+    vlm = VLMCommenter(api_key, commenter_prompt, provider=platform, model_name=model, base_url=base_url)
+    reviser = LLMReviser(api_key, reviser_prompt, provider=platform, model_name=model, base_url=base_url)
 
     current_input = input_path
     critic_his = ""
@@ -549,8 +611,8 @@ def refinement_poster(input_html_path, prompts, output_html_path, model, config=
         else:
             # === OpenAI Client Setup ===
             api_key = api_keys_conf.get('openai_api_key') or os.getenv("OPENAI_API_KEY")
-            
-            client = OpenAI(api_key=api_key)
+            base_url = api_keys_conf.get('openai_api_base') or api_keys_conf.get('openai_base_url') or os.getenv("OPENAI_BASE_URL")
+            client = _get_openai_client(config=config, api_key=api_key, base_url=base_url)
 
             # OpenAI 需要 Base64 编码的图片
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
@@ -745,7 +807,8 @@ def refinement_pr(pr_path: str, pr_refine_path: str, prompts: dict, model: str, 
                 raise ValueError("Missing config['api_keys']['openai_api_key']")
                 
             from openai import OpenAI
-            client = OpenAI(api_key=api_key)
+            base_url = api_keys.get("openai_api_base") or api_keys.get("openai_base_url") or os.getenv("OPENAI_BASE_URL")
+            client = _get_openai_client(config=config, api_key=api_key, base_url=base_url)
             
             response = client.chat.completions.create(
                 model=model,

@@ -100,24 +100,24 @@ def main():
 
         # === 清理 markdown ===                                              去除无意义的段落，如relative work，reference，appendix等等
         print("🧹 Cleaning markdown before splitting...")
-        cleaned_md_path = clean_paper(md_path, clean_prompt, model="gemini-3-pro-preview", config=config)
+        cleaned_md_path = clean_paper(md_path, clean_prompt, model=model_name, config=config)
 
         # === 利用gpt将论文分段 === 
-        paths = split_paper(cleaned_md_path, section_split_prompt, model="gemini-3-pro-preview" ,config=config)
+        paths = split_paper(cleaned_md_path, section_split_prompt, model=model_name, config=config)
         
         # === 利用gpt初始化dag === 
-        dag = initialize_dag(markdown_path=cleaned_md_path,initialize_dag_prompt=initialize_dag_prompt,model="gemini-3-pro-preview", config=config)
+        dag = initialize_dag(markdown_path=cleaned_md_path, initialize_dag_prompt=initialize_dag_prompt, model=model_name, config=config)
         dag_path = os.path.join(auto_path, "dag.json")
 
 
         # === 生成visual_dag === 
         visual_dag_path=os.path.join(auto_path, "visual_dag.json")
-        extract_and_generate_visual_dag(markdown_path=cleaned_md_path,prompt_for_gpt=visual_dag_prompt,output_json_path=visual_dag_path,model="gemini-3-pro-preview", config=config)
+        extract_and_generate_visual_dag(markdown_path=cleaned_md_path, prompt_for_gpt=visual_dag_prompt, output_json_path=visual_dag_path, model=model_name, config=config)
         add_resolution_to_visual_dag(auto_path, visual_dag_path)
 
         # === 生成section_dag ===
         section_split_output_path=os.path.join(subdir_path, "section_split_output")
-        build_section_dags(folder_path=section_split_output_path,base_prompt=section_dag_generation_prompt,model="gemini-3-pro-preview", config=config)
+        build_section_dags(folder_path=section_split_output_path, base_prompt=section_dag_generation_prompt, model=model_name, config=config)
 
 
         # === 向dag.json添加section_dag ===
@@ -192,7 +192,7 @@ def main():
         os.makedirs(poster_final_index, exist_ok=True)
 
         poster_final_output_path = os.path.join(poster_final_index, "poster_final.html")
-        print(f"🖊️ Refining poster HTML with Gemini...")
+        print(f"🖊️ Refining poster HTML with model: {model_name}")
         
 
         out = inject_img_section_to_poster(figure_path="./poster_template/expore_our_work_in_detail.jpg",auto_path=auto_path,poster_path=poster_path)

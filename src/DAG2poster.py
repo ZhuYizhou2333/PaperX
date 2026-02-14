@@ -14,6 +14,21 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 
 
+def _get_openai_client(config: Optional[dict], api_key: Optional[str] = None, base_url: Optional[str] = None) -> OpenAI:
+    api_keys = (config or {}).get("api_keys", {}) or {}
+    key = api_key or api_keys.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
+    endpoint = (
+        base_url
+        or api_keys.get("openai_api_base")
+        or api_keys.get("openai_base_url")
+        or os.getenv("OPENAI_BASE_URL")
+    )
+    kwargs = {"api_key": key, "timeout": 120, "max_retries": 2}
+    if endpoint:
+        kwargs["base_url"] = endpoint
+    return OpenAI(**kwargs)
+
+
 # ========== Generate poster_outline.txt via Gemini (section-by-section) ==========
 def _load_json(path: str) -> Dict[str, Any]:
     if not os.path.exists(path):
@@ -164,8 +179,8 @@ def generate_poster_outline_txt(
         else:
             # Setup OpenAI Client
             api_key = api_key or api_keys_config.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
-            
-            client = OpenAI(api_key=api_key)
+            base_url = base_url or api_keys_config.get("openai_api_base") or api_keys_config.get("openai_base_url") or os.getenv("OPENAI_BASE_URL")
+            client = _get_openai_client(config=config, api_key=api_key, base_url=base_url)
 
     # Output file init
     out_dir = os.path.dirname(os.path.abspath(poster_outline_path))
@@ -803,8 +818,8 @@ def modified_poster_logic(
     else:
         # --- OpenAI Client Setup ---
         api_key = api_keys_config.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
-
-        client = OpenAI(api_key=api_key)
+        base_url = api_keys_config.get("openai_api_base") or api_keys_config.get("openai_base_url") or os.getenv("OPENAI_BASE_URL")
+        client = _get_openai_client(config=config, api_key=api_key, base_url=base_url)
 
         # Call OpenAI
         messages = [
